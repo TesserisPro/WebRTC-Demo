@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Document</title>
+
+    <link rel="stylesheet" href="app/css/style.css">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.1/jquery.min.js"></script>
+</head>
+
+<body>
+    <header class="header">
+        <a href="http://www.tesseris.com/">
+            <img alt="Tesseris Pro LLC" class="logo" src="./app/img/logo.png">
+        </a>
+        <div class="header-motto">Your software development partner...</div>
+    </header>
+    <div id="videoContainer"></div>
+    <video id="local-video" autoplay muted></video>
+    <h2 class="waiting-for-clients">Waiting for clients to connect...</h2>
+    <script src="/app/js/socket.io.js"></script>
+    <script src="/app/js/adapter.js"></script>
+
+    <script>
+        console.log('x');
+        var iceConfig = {
+            'iceServers': [
+                {
+                    'urls': 'turn:52.169.153.149:3478',
+                    'username': 'test',
+                    'credential': 'pass2app@'
+                }
+            ]
+        };
+
+        var peers = {};
+        var localStream = null;
+        var currentId;
+        var localPeer;
+        var localVideo;
+        
+        var socket = io.connect();
+        addHandlers(socket);
+
+        navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: true
+            })
+            .then(function (stream) {
+                localStream = stream;
+                localVideo = document.getElementById("local-video");
+                localVideo.srcObject=localStream;
+                console.log('local strem id: ' + localStream.id);
+                socket.emit('init', {
+                    data: 'some data'
+                }, function (p1, p2) {
+                    currentId = p1;
+                });
+            })
+            .catch(function (err) {
+                console.error(err);
+            });
+
+        function addHandlers(socket) {
+            socket.on('init', function (initiator) {
+                if (initiator) {
+                    showWaitingText();
+                }
+            });
+
+            socket.on('newPeer', function (data) {
+                makeOffer(data);
+                hideWaitingText();
+            });
+
+            socket.on('message', function (message) {
+                handleMessage(message);
+            });
+
+            socket.on('disconnected', function (id) {
+                removeRemoteVideo('peer_' + id);
+                delete peers[id];
+                if (Object.keys(peers).length == 0) {
+                    showWaitingText();
+                }
+            });
+        }
+
+        function handleMessage(message) {
+            var pc = getConnection({
+                id: message.by,
+                socketId: message.socketId
+            });
+
+            switch (message.type) {
+                case 'ice':
+                debugger
+                    if (message.ice) {
+                        console.log('Adding ice candidates');
+                        pc.addIceCandidate(new RTCIceCandidate(message.ice))
+                            .catch(function (err) {
+                                console.error(err);
+                            });
+                    }
+                    break;
+
+                case 'offer':
+                    if (message.sdp) {
+                        debugger
+                        console.log('offer message came')
+                        pc.setRemoteDescription(new RTCSessionDescription(message.sdp))
+                            .then(function () {
+                                pc.createAnswer()
+                                    .then(function (sdp) {
+                                        pc.setLocalDescription(sdp);
+                                        console.log('sending answer');
+                                        socket.emit('message', {
+                                            by: currentId,
+                                            to: message.by,
+                                            sdp: sdp,
+                                            type: 'answer'
+                                        });
+                                    })
+                                    .catch(function (err) {
+                                        console.error(err);
+                                    });
+                            })
+                            .catch(function (err) {
+                                console.error(err);
+                            });
+                    }
+                    break;
+
+                case 'answer':
+                    if (message.sdp) {
+                        console.log('answer message came');
+                        pc.setRemoteDescription(new RTCSessionDescription(message.sdp))
+                            .then(function () {
+                                console.log('set remote by answer');
+                            })
+                            .catch(function (err) {
+                                console.error(err);
+                            });
+                    }
+                    break;
+            }
+        }
+
+        function getConnection(data) {
+            if (peers[data.socketId]) {
+                return peers[data.socketId];
+            }
+
+            var pc = new RTCPeerConnection(iceConfig);
+            if (pc.addTrack) {
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+                pc.ontrack = function (event) {
+                    setRemoteVideo(event.streams[0], data.socketId);
+                }
+            } else {
+                pc.addStream(localStream);
+                pc.onaddstream = function (event) {
+                    setRemoteVideo(event.stream, data.socketId);
+                }
+            }
+
+            pc.onicecandidate = function (evnt) {
+                socket.emit('message', {
+                    by: currentId,
+                    to: data.id,
+                    ice: evnt.candidate,
+                    type: 'ice'
+                });
+            };
+
+            peers[data.socketId] = pc;
+
+            return pc;
+        }
+
+        function setRemoteVideo(stream, id) {
+            var containerId = "peer_" + id;
+            if (!document.getElementById(containerId)) {
+                var video = document.createElement('video');
+                video.autoplay = true;
+                video.srcObject = stream;
+
+                var container = document.createElement('div');
+                container.id = containerId;
+                container.className = 'remote-video';
+                container.appendChild(video);
+
+                var videoContainer = document.getElementById('videoContainer');
+                videoContainer.appendChild(container);
+                console.log('Set remote stream id:' + stream.id);
+            }
+        }
+
+        function removeRemoteVideo(id) {
+            var container = document.getElementById(id);
+            if (!container) {
+                return;
+            }
+
+            var videoContainer = document.getElementById('videoContainer');
+            videoContainer.removeChild(container);
+        }
+
+        function makeOffer(data) {
+            var pc = getConnection(data);
+
+            pc.createOffer({
+                    mandatory: {
+                        offerToReceiveVideo: true,
+                        offerToReceiveAudio: true
+                    }
+                })
+                .then(function (offer) {
+                    pc.setLocalDescription(offer);
+                    socket.emit('message', {
+                        by: currentId,
+                        to: data.id,
+                        sdp: offer,
+                        type: 'offer'
+                    });
+                })
+                .catch(function (err) {
+                    console.error(err);
+                });
+        }
+
+        function showWaitingText() {
+            $('.waiting-for-clients').removeClass('hide');
+        }
+
+        function hideWaitingText() {
+            $('.waiting-for-clients').addClass('hide');
+        }
+    </script>
+</body>
+
+</html>
